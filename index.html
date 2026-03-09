@@ -1,0 +1,327 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Empaquetado de Rectángulos (ancho fijo)</title>
+  <style>
+    :root {
+      color-scheme: light;
+      font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+    }
+    body {
+      margin: 0;
+      padding: 24px;
+      background: #f6f7fb;
+      color: #222;
+    }
+    .container {
+      max-width: 1100px;
+      margin: 0 auto;
+      display: grid;
+      gap: 16px;
+      grid-template-columns: 360px 1fr;
+      align-items: start;
+    }
+    .panel, .result {
+      background: white;
+      border-radius: 12px;
+      box-shadow: 0 8px 20px rgba(0, 0, 0, 0.06);
+      padding: 16px;
+    }
+    label {
+      font-weight: 600;
+      display: block;
+      margin: 8px 0 6px;
+    }
+    input, textarea, button {
+      width: 100%;
+      box-sizing: border-box;
+      font: inherit;
+      border: 1px solid #ccd2df;
+      border-radius: 8px;
+      padding: 10px;
+    }
+    textarea {
+      min-height: 180px;
+      resize: vertical;
+    }
+    button {
+      margin-top: 12px;
+      border: none;
+      background: #1f6feb;
+      color: white;
+      cursor: pointer;
+      font-weight: 700;
+    }
+    button:hover {
+      background: #185bcc;
+    }
+    #status {
+      margin-top: 10px;
+      min-height: 1.3em;
+      font-size: 0.95rem;
+    }
+    #status.error { color: #b00020; }
+    #status.ok { color: #08660f; }
+    canvas {
+      width: 100%;
+      max-height: 75vh;
+      background: #fff;
+      border: 1px solid #d5dbeb;
+      border-radius: 10px;
+    }
+    .meta {
+      margin-bottom: 12px;
+      font-size: 0.95rem;
+      color: #475569;
+    }
+    code {
+      background: #eef2ff;
+      padding: 2px 6px;
+      border-radius: 6px;
+    }
+    @media (max-width: 900px) {
+      .container {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <section class="panel">
+      <h2>Configuración</h2>
+      <label for="fixedWidth">Ancho fijo del contenedor (w0)</label>
+      <input id="fixedWidth" type="number" min="1" value="12" />
+
+      <label for="rectangles">Lista de rectángulos (JSON)</label>
+      <textarea id="rectangles">[[5,3],[3,2],[4,4],[2,7],[6,2],[3,5],[4,2]]</textarea>
+
+      <button id="solveBtn">Optimizar acomodo</button>
+      <div id="status"></div>
+    </section>
+
+    <section class="result">
+      <h2>Resultado</h2>
+      <div id="meta" class="meta">Ingresa datos y pulsa <code>Optimizar acomodo</code>.</div>
+      <canvas id="canvas" width="900" height="600"></canvas>
+    </section>
+  </div>
+
+  <script>
+    const fixedWidthInput = document.getElementById('fixedWidth');
+    const rectanglesInput = document.getElementById('rectangles');
+    const solveBtn = document.getElementById('solveBtn');
+    const statusEl = document.getElementById('status');
+    const metaEl = document.getElementById('meta');
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+
+    solveBtn.addEventListener('click', run);
+
+    function run() {
+      try {
+        statusEl.className = '';
+        statusEl.textContent = 'Calculando...';
+
+        const w0 = Number(fixedWidthInput.value);
+        if (!Number.isFinite(w0) || w0 <= 0) throw new Error('w0 debe ser un número positivo.');
+
+        const raw = JSON.parse(rectanglesInput.value);
+        if (!Array.isArray(raw) || raw.length === 0) throw new Error('La lista de rectángulos no es válida.');
+
+        const rects = raw.map((item, idx) => {
+          if (!Array.isArray(item) || item.length !== 2) {
+            throw new Error(`El rectángulo #${idx + 1} debe tener formato [ancho,alto].`);
+          }
+          const w = Number(item[0]);
+          const h = Number(item[1]);
+          if (!Number.isFinite(w) || !Number.isFinite(h) || w <= 0 || h <= 0) {
+            throw new Error(`El rectángulo #${idx + 1} tiene dimensiones inválidas.`);
+          }
+          return { id: idx, w, h, area: w * h };
+        });
+
+        for (const r of rects) {
+          if (Math.min(r.w, r.h) > w0 && Math.max(r.w, r.h) > w0) {
+            throw new Error(`El rectángulo #${r.id + 1} no cabe en el ancho fijo ${w0}, ni rotándolo.`);
+          }
+        }
+
+        const solution = optimizePacking(rects, w0);
+        if (!solution) {
+          throw new Error('No se encontró un acomodo exacto dentro de los límites de búsqueda.');
+        }
+
+        statusEl.className = 'ok';
+        statusEl.textContent = 'Acomodo encontrado.';
+
+        const areaTotal = rects.reduce((sum, r) => sum + r.area, 0);
+        const utilization = (100 * areaTotal / (w0 * solution.height)).toFixed(2);
+
+        metaEl.textContent = `Altura mínima encontrada (hx): ${solution.height}. Aprovechamiento: ${utilization}% (${areaTotal}/${w0 * solution.height}).`;
+        drawPacking(w0, solution.height, solution.placements);
+      } catch (err) {
+        statusEl.className = 'error';
+        statusEl.textContent = err.message;
+        metaEl.textContent = 'No se pudo calcular la solución.';
+        clearCanvas();
+      }
+    }
+
+    function optimizePacking(rects, w0) {
+      const lowerBound = Math.max(
+        Math.ceil(rects.reduce((sum, r) => sum + r.area, 0) / w0),
+        Math.max(...rects.map((r) => Math.min(r.w, r.h)))
+      );
+      const upperBound = greedyUpperBound(rects, w0);
+
+      let best = null;
+      let lo = lowerBound;
+      let hi = upperBound;
+
+      while (lo <= hi) {
+        const mid = Math.floor((lo + hi) / 2);
+        const attempt = canPack(rects, w0, mid);
+        if (attempt) {
+          best = { height: mid, placements: attempt };
+          hi = mid - 1;
+        } else {
+          lo = mid + 1;
+        }
+      }
+      return best;
+    }
+
+    function greedyUpperBound(rects, w0) {
+      const sorted = [...rects].sort((a, b) => b.area - a.area);
+      let y = 0;
+      let rowHeight = 0;
+      let rowWidth = 0;
+
+      for (const r of sorted) {
+        const options = [[r.w, r.h], [r.h, r.w]].filter(([w]) => w <= w0);
+        options.sort((a, b) => a[1] - b[1]);
+
+        let placed = false;
+        for (const [w, h] of options) {
+          if (rowWidth + w <= w0) {
+            rowWidth += w;
+            rowHeight = Math.max(rowHeight, h);
+            placed = true;
+            break;
+          }
+        }
+
+        if (!placed) {
+          y += rowHeight;
+          rowHeight = 0;
+          rowWidth = 0;
+          const best = options[0];
+          if (!best) throw new Error(`No hay orientación posible para el rectángulo #${r.id + 1}.`);
+          rowWidth = best[0];
+          rowHeight = best[1];
+        }
+      }
+      return y + rowHeight;
+    }
+
+    function canPack(rects, w0, H) {
+      const items = [...rects].sort((a, b) => b.area - a.area || b.h - a.h || b.w - a.w);
+      const placed = [];
+      const unplaced = new Set(items.map((r) => r.id));
+
+      function search() {
+        if (unplaced.size === 0) return true;
+
+        // Poda segura por capacidad total: evita descartar configuraciones válidas con huecos.
+        const usedArea = placed.reduce((sum, p) => sum + p.w * p.h, 0);
+        const remainingArea = [...unplaced].reduce((sum, id) => sum + rects[id].area, 0);
+        if (usedArea + remainingArea > w0 * H) return false;
+
+        const next = items.find((r) => unplaced.has(r.id));
+        const orientations = [];
+        orientations.push([next.w, next.h]);
+        if (next.w !== next.h) orientations.push([next.h, next.w]);
+
+        const xs = [0, ...placed.map((p) => p.x + p.w)].filter((x, i, arr) => x <= w0 && arr.indexOf(x) === i).sort((a, b) => a - b);
+        const ys = [0, ...placed.map((p) => p.y + p.h)].filter((y, i, arr) => y <= H && arr.indexOf(y) === i).sort((a, b) => a - b);
+
+        for (const [w, h] of orientations) {
+          if (w > w0 || h > H) continue;
+          for (const y of ys) {
+            if (y + h > H) break;
+            for (const x of xs) {
+              if (x + w > w0) break;
+              if (overlapsAny(x, y, w, h, placed)) continue;
+
+              placed.push({ id: next.id, x, y, w, h });
+              unplaced.delete(next.id);
+
+              if (search()) return true;
+
+              unplaced.add(next.id);
+              placed.pop();
+            }
+          }
+        }
+        return false;
+      }
+
+      const ok = search();
+      return ok ? [...placed] : null;
+    }
+
+    function overlapsAny(x, y, w, h, placed) {
+      for (const p of placed) {
+        const noOverlap = x + w <= p.x || p.x + p.w <= x || y + h <= p.y || p.y + p.h <= y;
+        if (!noOverlap) return true;
+      }
+      return false;
+    }
+
+    function drawPacking(w0, h0, placements) {
+      clearCanvas();
+      const pad = 24;
+      const availableW = canvas.width - pad * 2;
+      const availableH = canvas.height - pad * 2;
+      const scale = Math.min(availableW / w0, availableH / h0);
+
+      const drawW = w0 * scale;
+      const drawH = h0 * scale;
+      const ox = (canvas.width - drawW) / 2;
+      const oy = (canvas.height - drawH) / 2;
+
+      ctx.strokeStyle = '#111827';
+      ctx.lineWidth = 2;
+      ctx.strokeRect(ox, oy, drawW, drawH);
+
+      for (const p of placements) {
+        const x = ox + p.x * scale;
+        const y = oy + p.y * scale;
+        const w = p.w * scale;
+        const h = p.h * scale;
+        const hue = (p.id * 47) % 360;
+        ctx.fillStyle = `hsl(${hue} 70% 75%)`;
+        ctx.fillRect(x, y, w, h);
+        ctx.strokeStyle = `hsl(${hue} 65% 40%)`;
+        ctx.lineWidth = 1.5;
+        ctx.strokeRect(x, y, w, h);
+
+        ctx.fillStyle = '#0f172a';
+        ctx.font = '12px sans-serif';
+        ctx.fillText(`#${p.id + 1} (${p.w}×${p.h})`, x + 4, y + 14);
+      }
+    }
+
+    function clearCanvas() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.fillStyle = '#f8fafc';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+    }
+
+    clearCanvas();
+  </script>
+</body>
+</html>

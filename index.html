@@ -160,7 +160,7 @@
         const areaTotal = rects.reduce((sum, r) => sum + r.area, 0);
         const utilization = (100 * areaTotal / (w0 * solution.height)).toFixed(2);
 
-        metaEl.textContent = `Altura mínima encontrada (hx): ${solution.height}. Aprovechamiento: ${utilization}% (${areaTotal}/${w0 * solution.height}).`;
+        metaEl.textContent = `Altura mínima encontrada (hx): ${solution.height}. Aprovechamiento: ${utilization}% (${areaTotal}/${w0 * solution.height}). Huecos conectados: ${solution.metrics.emptyRegions}.`;
         drawPacking(w0, solution.height, solution.placements);
       } catch (err) {
         statusEl.className = 'error';
@@ -185,7 +185,12 @@
         const mid = Math.floor((lo + hi) / 2);
         const attempt = canPack(rects, w0, mid);
         if (attempt) {
-          best = { height: mid, placements: attempt };
+          const refined = refinePacking(rects, w0, mid, attempt);
+          best = {
+            height: mid,
+            placements: refined.placements,
+            metrics: refined.metrics
+          };
           hi = mid - 1;
         } else {
           lo = mid + 1;
@@ -271,6 +276,190 @@
 
       const ok = search();
       return ok ? [...placed] : null;
+    }
+
+    function refinePacking(rects, w0, H, initialPlacements) {
+      const items = [...rects].sort((a, b) => b.area - a.area || b.h - a.h || b.w - a.w);
+      const placed = [];
+      const unplaced = new Set(items.map((r) => r.id));
+      const totalArea = rects.reduce((sum, r) => sum + r.area, 0);
+      const minPossibleEmptyRegions = totalArea === w0 * H ? 0 : 1;
+      const startedAt = now();
+      const timeBudgetMs = 250;
+
+      let bestPlacements = [...initialPlacements];
+      let bestMetrics = measureEmptySpace(w0, H, bestPlacements);
+      let timedOut = false;
+
+      function search() {
+        if (timedOut || bestMetrics.emptyRegions === minPossibleEmptyRegions) return;
+        if (now() - startedAt > timeBudgetMs) {
+          timedOut = true;
+          return;
+        }
+
+        if (unplaced.size === 0) {
+          const metrics = measureEmptySpace(w0, H, placed);
+          if (compareLayoutMetrics(metrics, bestMetrics) < 0) {
+            bestMetrics = metrics;
+            bestPlacements = [...placed];
+          }
+          return;
+        }
+
+        const nextState = selectMostConstrainedItem(items, unplaced, placed, w0, H);
+        if (!nextState || nextState.candidates.length === 0) return;
+
+        const rankedCandidates = nextState.candidates
+          .map((candidate) => ({
+            candidate,
+            metrics: measureEmptySpace(w0, H, [...placed, candidate])
+          }))
+          .sort((a, b) => compareLayoutMetrics(a.metrics, b.metrics) || comparePlacementOrder(a.candidate, b.candidate));
+
+        unplaced.delete(nextState.item.id);
+        for (const entry of rankedCandidates) {
+          placed.push(entry.candidate);
+          search();
+          placed.pop();
+          if (timedOut || bestMetrics.emptyRegions === minPossibleEmptyRegions) break;
+        }
+        unplaced.add(nextState.item.id);
+      }
+
+      search();
+      return { placements: bestPlacements, metrics: bestMetrics };
+    }
+
+    function selectMostConstrainedItem(items, unplaced, placed, w0, H) {
+      let best = null;
+
+      for (const item of items) {
+        if (!unplaced.has(item.id)) continue;
+        const candidates = buildPlacementCandidates(item, placed, w0, H);
+        if (!best || candidates.length < best.candidates.length || (candidates.length === best.candidates.length && item.area > best.item.area)) {
+          best = { item, candidates };
+        }
+        if (best && best.candidates.length <= 1) break;
+      }
+
+      return best;
+    }
+
+    function buildPlacementCandidates(rect, placed, w0, H) {
+      const candidates = [];
+      const seen = new Set();
+      const orientations = getOrientations(rect);
+      const xs = [0, ...placed.map((p) => p.x + p.w)]
+        .filter((x, index, arr) => x <= w0 && arr.indexOf(x) === index)
+        .sort((a, b) => a - b);
+      const ys = [0, ...placed.map((p) => p.y + p.h)]
+        .filter((y, index, arr) => y <= H && arr.indexOf(y) === index)
+        .sort((a, b) => a - b);
+
+      for (const [w, h] of orientations) {
+        if (w > w0 || h > H) continue;
+        for (const y of ys) {
+          if (y + h > H) break;
+          for (const x of xs) {
+            if (x + w > w0) break;
+            if (overlapsAny(x, y, w, h, placed)) continue;
+
+            const key = `${x}:${y}:${w}:${h}`;
+            if (seen.has(key)) continue;
+            seen.add(key);
+            candidates.push({ id: rect.id, x, y, w, h });
+          }
+        }
+      }
+
+      return candidates;
+    }
+
+    function getOrientations(rect) {
+      return rect.w === rect.h ? [[rect.w, rect.h]] : [[rect.w, rect.h], [rect.h, rect.w]];
+    }
+
+    function measureEmptySpace(w0, H, placements) {
+      const xs = uniqueSorted([0, w0, ...placements.flatMap((p) => [p.x, p.x + p.w])]);
+      const ys = uniqueSorted([0, H, ...placements.flatMap((p) => [p.y, p.y + p.h])]);
+      const xIndex = new Map(xs.map((value, index) => [value, index]));
+      const yIndex = new Map(ys.map((value, index) => [value, index]));
+      const rows = ys.length - 1;
+      const cols = xs.length - 1;
+      const occupied = Array.from({ length: rows }, () => Array(cols).fill(false));
+      const visited = Array.from({ length: rows }, () => Array(cols).fill(false));
+
+      for (const p of placements) {
+        const x0 = xIndex.get(p.x);
+        const x1 = xIndex.get(p.x + p.w);
+        const y0 = yIndex.get(p.y);
+        const y1 = yIndex.get(p.y + p.h);
+
+        for (let yi = y0; yi < y1; yi += 1) {
+          for (let xi = x0; xi < x1; xi += 1) {
+            occupied[yi][xi] = true;
+          }
+        }
+      }
+
+      const regionAreas = [];
+      const directions = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+
+      for (let yi = 0; yi < rows; yi += 1) {
+        for (let xi = 0; xi < cols; xi += 1) {
+          if (occupied[yi][xi] || visited[yi][xi]) continue;
+
+          let area = 0;
+          const stack = [[xi, yi]];
+          visited[yi][xi] = true;
+
+          while (stack.length > 0) {
+            const [cx, cy] = stack.pop();
+            area += (xs[cx + 1] - xs[cx]) * (ys[cy + 1] - ys[cy]);
+
+            for (const [dx, dy] of directions) {
+              const nx = cx + dx;
+              const ny = cy + dy;
+              if (nx < 0 || ny < 0 || nx >= cols || ny >= rows) continue;
+              if (occupied[ny][nx] || visited[ny][nx]) continue;
+              visited[ny][nx] = true;
+              stack.push([nx, ny]);
+            }
+          }
+
+          regionAreas.push(area);
+        }
+      }
+
+      const largestEmptyArea = regionAreas.length > 0 ? Math.max(...regionAreas) : 0;
+      const squaredEmptyAreaSum = regionAreas.reduce((sum, area) => sum + area * area, 0);
+
+      return {
+        emptyRegions: regionAreas.length,
+        largestEmptyArea,
+        squaredEmptyAreaSum
+      };
+    }
+
+    function compareLayoutMetrics(a, b) {
+      return (a.emptyRegions - b.emptyRegions)
+        || (b.largestEmptyArea - a.largestEmptyArea)
+        || (b.squaredEmptyAreaSum - a.squaredEmptyAreaSum);
+    }
+
+    function comparePlacementOrder(a, b) {
+      return (a.y - b.y) || (a.x - b.x) || (b.h - a.h) || (b.w - a.w);
+    }
+
+    function uniqueSorted(values) {
+      return [...new Set(values)].sort((a, b) => a - b);
+    }
+
+    function now() {
+      return typeof performance !== 'undefined' && typeof performance.now === 'function'
+        ? performance.now()
+        : Date.now();
     }
 
     function overlapsAny(x, y, w, h, placed) {

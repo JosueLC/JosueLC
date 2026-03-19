@@ -34,7 +34,7 @@
       display: block;
       margin: 8px 0 6px;
     }
-    input, textarea, button {
+    input, button {
       width: 100%;
       box-sizing: border-box;
       font: inherit;
@@ -42,9 +42,40 @@
       border-radius: 8px;
       padding: 10px;
     }
-    textarea {
-      min-height: 180px;
-      resize: vertical;
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 8px;
+    }
+    th, td {
+      border: 1px solid #d7ddea;
+      padding: 6px;
+      text-align: left;
+    }
+    th {
+      background: #f8fafc;
+      font-size: 0.9rem;
+    }
+    td input {
+      width: 100%;
+      margin: 0;
+      padding: 8px;
+      border-radius: 6px;
+    }
+    .actions-col {
+      width: 92px;
+      text-align: center;
+    }
+    .row-delete-btn {
+      width: auto;
+      margin: 0;
+      padding: 6px 10px;
+      border-radius: 6px;
+      background: #dc2626;
+      font-weight: 600;
+    }
+    .row-delete-btn:hover {
+      background: #b91c1c;
     }
     button {
       margin-top: 12px;
@@ -95,8 +126,20 @@
       <label for="fixedWidth">Ancho fijo del contenedor (w0)</label>
       <input id="fixedWidth" type="number" min="1" value="12" />
 
-      <label for="rectangles">Lista de rectángulos (JSON)</label>
-      <textarea id="rectangles">[[5,3],[3,2],[4,4],[2,7],[6,2],[3,5],[4,2]]</textarea>
+      <label>Tipos de rectángulos</label>
+      <table>
+        <thead>
+          <tr>
+            <th>Alto</th>
+            <th>Ancho</th>
+            <th>Cantidad</th>
+            <th class="actions-col">Acciones</th>
+          </tr>
+        </thead>
+        <tbody id="rectanglesTableBody"></tbody>
+      </table>
+
+      <button id="addRowBtn" type="button">Agregar fila</button>
 
       <button id="solveBtn">Optimizar acomodo</button>
       <div id="status"></div>
@@ -111,14 +154,20 @@
 
   <script>
     const fixedWidthInput = document.getElementById('fixedWidth');
-    const rectanglesInput = document.getElementById('rectangles');
+    const rectanglesTableBody = document.getElementById('rectanglesTableBody');
+    const addRowBtn = document.getElementById('addRowBtn');
     const solveBtn = document.getElementById('solveBtn');
     const statusEl = document.getElementById('status');
     const metaEl = document.getElementById('meta');
     const canvas = document.getElementById('canvas');
     const ctx = canvas.getContext('2d');
 
+    addRowBtn.addEventListener('click', () => addRectangleRow());
     solveBtn.addEventListener('click', run);
+
+    addRectangleRow({ h: 3, w: 5, qty: 1 });
+    addRectangleRow({ h: 2, w: 3, qty: 1 });
+    addRectangleRow({ h: 4, w: 4, qty: 1 });
 
     function run() {
       try {
@@ -128,20 +177,7 @@
         const w0 = Number(fixedWidthInput.value);
         if (!Number.isFinite(w0) || w0 <= 0) throw new Error('w0 debe ser un número positivo.');
 
-        const raw = JSON.parse(rectanglesInput.value);
-        if (!Array.isArray(raw) || raw.length === 0) throw new Error('La lista de rectángulos no es válida.');
-
-        const rects = raw.map((item, idx) => {
-          if (!Array.isArray(item) || item.length !== 2) {
-            throw new Error(`El rectángulo #${idx + 1} debe tener formato [ancho,alto].`);
-          }
-          const w = Number(item[0]);
-          const h = Number(item[1]);
-          if (!Number.isFinite(w) || !Number.isFinite(h) || w <= 0 || h <= 0) {
-            throw new Error(`El rectángulo #${idx + 1} tiene dimensiones inválidas.`);
-          }
-          return { id: idx, w, h, area: w * h };
-        });
+        const rects = getRectanglesFromTable();
 
         for (const r of rects) {
           if (Math.min(r.w, r.h) > w0 && Math.max(r.w, r.h) > w0) {
@@ -168,6 +204,67 @@
         metaEl.textContent = 'No se pudo calcular la solución.';
         clearCanvas();
       }
+    }
+
+    function addRectangleRow(values = {}) {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td><input type="number" min="1" step="1" class="rect-h" value="${values.h ?? ''}" /></td>
+        <td><input type="number" min="1" step="1" class="rect-w" value="${values.w ?? ''}" /></td>
+        <td><input type="number" min="1" step="1" class="rect-qty" value="${values.qty ?? ''}" /></td>
+        <td class="actions-col"><button type="button" class="row-delete-btn">Eliminar</button></td>
+      `;
+      const deleteBtn = tr.querySelector('.row-delete-btn');
+      deleteBtn.addEventListener('click', () => removeRectangleRow(tr));
+      rectanglesTableBody.appendChild(tr);
+    }
+
+    function removeRectangleRow(row) {
+      const rows = [...rectanglesTableBody.querySelectorAll('tr')];
+      if (rows.length <= 1) {
+        row.querySelector('.rect-h').value = '';
+        row.querySelector('.rect-w').value = '';
+        row.querySelector('.rect-qty').value = '';
+        return;
+      }
+      row.remove();
+    }
+
+    function getRectanglesFromTable() {
+      const rows = [...rectanglesTableBody.querySelectorAll('tr')];
+      if (rows.length === 0) throw new Error('Agrega al menos una fila de rectángulos.');
+
+      const rects = [];
+
+      for (let rowIndex = 0; rowIndex < rows.length; rowIndex += 1) {
+        const row = rows[rowIndex];
+        const hInput = row.querySelector('.rect-h');
+        const wInput = row.querySelector('.rect-w');
+        const qtyInput = row.querySelector('.rect-qty');
+        const h = Number(hInput.value);
+        const w = Number(wInput.value);
+        const qty = Number(qtyInput.value);
+
+        const isBlank = hInput.value.trim() === '' && wInput.value.trim() === '' && qtyInput.value.trim() === '';
+        if (isBlank) continue;
+
+        if (!Number.isFinite(w) || !Number.isFinite(h) || w <= 0 || h <= 0) {
+          throw new Error(`La fila #${rowIndex + 1} tiene alto/ancho inválido.`);
+        }
+        if (!Number.isInteger(qty) || qty <= 0) {
+          throw new Error(`La fila #${rowIndex + 1} tiene una cantidad inválida.`);
+        }
+
+        for (let count = 0; count < qty; count += 1) {
+          rects.push({ id: rects.length, w, h, area: w * h });
+        }
+      }
+
+      if (rects.length === 0) {
+        throw new Error('No hay rectángulos válidos para procesar.');
+      }
+
+      return rects;
     }
 
     function optimizePacking(rects, w0) {
